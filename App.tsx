@@ -38,7 +38,19 @@ export default function App() {
 
     // --- State: Session & DB ---
     const [sessionUid, setSessionUid] = useState<string>(crypto.randomUUID());
+    const sessionUidRef = useRef(sessionUid);
+
+    useEffect(() => {
+        sessionUidRef.current = sessionUid;
+    }, [sessionUid]);
+
     const [sessionName, setSessionName] = useState<string | null>(null);
+    const sessionNameRef = useRef(sessionName);
+
+    useEffect(() => {
+        sessionNameRef.current = sessionName;
+    }, [sessionName]);
+
     const [dbStats, setDbStats] = useState<{ total: number, session: number }>({ total: 0, session: 0 });
     const [sparklineHistory, setSparklineHistory] = useState<number[]>([]);
 
@@ -156,6 +168,7 @@ export default function App() {
     // Log Management
     const [visibleLogs, setVisibleLogs] = useState<SynthLogItem[]>([]);
     const [totalLogCount, setTotalLogCount] = useState(0);
+    const [logsTrigger, setLogsTrigger] = useState(0);
     const [currentPage, setCurrentPage] = useState(1);
 
     const [isRunning, setIsRunning] = useState(false);
@@ -198,11 +211,13 @@ export default function App() {
 
     // Load logs from local storage when session changes or pagination upgrades
     const refreshLogs = useCallback(() => {
-        const storedLogs = LogStorageService.getLogs(sessionUid, currentPage, feedPageSize);
+        // Use ref to ensure we read from the same session the worker is writing to
+        const currentSessionId = sessionUidRef.current;
+        const storedLogs = LogStorageService.getLogs(currentSessionId, currentPage, feedPageSize);
         setVisibleLogs(storedLogs);
-        const total = LogStorageService.getTotalCount(sessionUid);
+        const total = LogStorageService.getTotalCount(currentSessionId);
         setTotalLogCount(total);
-    }, [sessionUid, currentPage, feedPageSize]);
+    }, [currentPage, feedPageSize, logsTrigger]);
 
     // Initial Load & Session Switch
     useEffect(() => {
@@ -467,6 +482,15 @@ export default function App() {
             });
             return { ...prev, phases: newPhases };
         });
+        // Also apply to User Agent config
+        setUserAgentConfig(prev => ({
+            ...prev,
+            provider: source.provider,
+            externalProvider: source.externalProvider,
+            apiKey: source.apiKey,
+            model: source.model,
+            customBaseUrl: source.customBaseUrl
+        }));
     };
 
     const getGenerationParams = (): GenerationParams | undefined => {
@@ -500,7 +524,7 @@ export default function App() {
             sessionUid: sessionUid, // Include sessionUid to track logs across sessions
             config: {
                 appMode, engineMode, environment, provider, externalProvider, externalApiKey, externalModel,
-                customBaseUrl, deepConfig, concurrency, rowsToFetch, skipRows, sleepTime, maxRetries, retryDelay,
+                customBaseUrl, deepConfig, userAgentConfig, concurrency, rowsToFetch, skipRows, sleepTime, maxRetries, retryDelay,
                 feedPageSize, dataSourceMode, hfConfig, geminiTopic, topicCategory, systemPrompt, converterPrompt,
                 converterInputText, generationParams: { temperature, topP, topK, frequencyPenalty, presencePenalty }
             }
@@ -539,6 +563,9 @@ export default function App() {
                         };
                     }
                     setDeepConfig(mergedDeepConfig);
+                }
+                if (c.userAgentConfig) {
+                    setUserAgentConfig(c.userAgentConfig);
                 }
                 if (c.concurrency) setConcurrency(c.concurrency);
                 if (c.rowsToFetch) setRowsToFetch(c.rowsToFetch);
@@ -674,7 +701,8 @@ export default function App() {
     // (Identical generateSingleItem, retryItem, retrySave, retryAllFailed, startGeneration, stopGeneration logic)
     // --- Core Generation Logic ---
     // (Identical generateSingleItem, retryItem, retrySave, retryAllFailed, startGeneration, stopGeneration logic)
-    const generateSingleItem = async (inputText: string, workerId: number, retryId?: string): Promise<SynthLogItem | null> => {
+    const generateSingleItem = async (inputText: string, workerId: number, opts: { retryId?: string, originalQuestion?: string } = {}): Promise<SynthLogItem | null> => {
+        const { retryId, originalQuestion } = opts;
         const startTime = Date.now();
         try {
             const safeInput = typeof inputText === 'string' ? inputText : String(inputText);
@@ -751,6 +779,44 @@ export default function App() {
                     retryDelay,
                     generationParams: genParams
                 });
+
+                // If User Agent is enabled, run multi-turn conversation
+                if (userAgentConfig.enabled && userAgentConfig.followUpCount > 0) {
+                    // Determine which responder to use based on user selection
+                    const responderPhase = userAgentConfig.responderPhase || 'writer';
+                    const responderConfig = responderPhase === 'responder'
+                        ? {
+                            provider: userAgentConfig.provider,
+                            externalProvider: userAgentConfig.externalProvider,
+                            apiKey: userAgentConfig.apiKey,
+                            model: userAgentConfig.model,
+                            customBaseUrl: userAgentConfig.customBaseUrl,
+                            systemPrompt: DEEP_PHASE_PROMPTS.responder
+                        }
+                        : runtimeDeepConfig.phases[responderPhase as keyof typeof runtimeDeepConfig.phases];
+
+                    const multiTurnResult = await DeepReasoningService.orchestrateMultiTurnConversation({
+                        initialInput: inputPayload,
+                        initialQuery: originalQuestion || deepResult.query || inputPayload.substring(0, 200), // Use detected question or query or fallback
+                        initialResponse: deepResult.answer || '',
+                        initialReasoning: deepResult.reasoning || '',
+                        userAgentConfig: userAgentConfig,
+                        responderConfig: responderConfig,
+                        signal: abortControllerRef.current?.signal || undefined,
+                        maxRetries,
+                        retryDelay,
+                        generationParams: genParams
+                    });
+
+                    return {
+                        ...multiTurnResult,
+                        sessionUid: sessionUid,
+                        duration: Date.now() - startTime,
+                        tokenCount: Math.round((multiTurnResult.answer?.length || 0 + (multiTurnResult.reasoning?.length || 0)) / 4),
+                        isMultiTurn: true
+                    };
+                }
+
                 const answer = deepResult.answer || "";
                 const reasoning = deepResult.reasoning || "";
                 return {
@@ -788,7 +854,7 @@ export default function App() {
         setRetryingIds(prev => new Set(prev).add(id));
         try {
             // Re-generate but keep same ID for UI continuity so we replace the card
-            const result = await generateSingleItem(logItem.full_seed, 0, id);
+            const result = await generateSingleItem(logItem.full_seed, 0, { retryId: id });
             if (result) {
                 // Determine if we should save to Firebase
                 if (environment === 'production' && !result.isError) {
@@ -859,7 +925,7 @@ export default function App() {
                 const item = queue.shift();
                 if (!item) break;
                 activeWorkers++;
-                generateSingleItem(item.full_seed, 0, item.id).then(async (result) => {
+                generateSingleItem(item.full_seed, 0, { retryId: item.id }).then(async (result) => {
                     activeWorkers--;
                     if (result) {
                         if (environment === 'production' && !result.isError) {
@@ -882,6 +948,7 @@ export default function App() {
         if (!append) {
             const newUid = crypto.randomUUID();
             setSessionUid(newUid);
+            sessionUidRef.current = newUid; // Sync immediately for worker
             setVisibleLogs([]);
             setTotalLogCount(0);
             setSparklineHistory([]);
@@ -908,23 +975,33 @@ export default function App() {
         setIsRunning(true);
         abortControllerRef.current = new AbortController();
         try {
-            let inputs: string[] = [];
+            // Updated item structure to preserve original row context
+            interface WorkItem {
+                content: string;
+                row?: any;
+            }
+            let workItems: WorkItem[] = [];
+
             if (dataSourceMode === 'huggingface') {
                 setProgress({ current: 0, total: rowsToFetch, activeWorkers: 1 });
                 const rows = await fetchHuggingFaceRows(hfConfig, skipRows, rowsToFetch);
-                inputs = rows.map(getRowContent);
+                workItems = rows.map(row => ({
+                    content: getRowContent(row),
+                    row: row
+                }));
             } else if (dataSourceMode === 'manual') {
                 const lines = converterInputText.split('\n').filter(line => line.trim().length > 0);
-                inputs = lines.map(line => {
+                workItems = lines.map(line => {
                     try {
                         const obj = JSON.parse(line);
-                        return getRowContent(obj);
+                        return { content: getRowContent(obj), row: obj };
                     } catch {
-                        return line;
+                        return { content: line, row: null }; // fast path for raw strings
                     }
                 });
-                if (inputs.length === 0) throw new Error("Input text is empty.");
+                if (workItems.length === 0) throw new Error("Input text is empty.");
             } else {
+                // Synthetic
                 const MAX_SEEDS_PER_BATCH = 10;
                 const totalNeeded = rowsToFetch;
                 let collectedSeeds: string[] = [];
@@ -948,22 +1025,88 @@ export default function App() {
                     collectedSeeds = [...collectedSeeds, ...batchSeeds];
                     setProgress(p => ({ ...p, current: collectedSeeds.length, total: totalNeeded }));
                 }
-                inputs = collectedSeeds;
+                workItems = collectedSeeds.map(s => ({ content: s, row: null }));
             }
 
-            if (inputs.length === 0) throw new Error("No inputs generated or parsed.");
+            if (workItems.length === 0) throw new Error("No inputs generated or parsed.");
 
-            setProgress({ current: 0, total: inputs.length, activeWorkers: 0 });
+            if (!append) {
+                // Clear existing for this session? No, keeping session log
+                // But if user wants new "Run", maybe clear?
+                // Logic: Start Generation keeps appending to session.
+            }
+
+            // Auto-generate session name if default/empty
+            if (!sessionName) {
+                const autoName = `${engineMode}-${new Date().toISOString().slice(0, 10)}`;
+                setSessionName(autoName);
+                sessionNameRef.current = autoName;
+            }
+
+            setProgress({ current: 0, total: workItems.length, activeWorkers: 0 });
             let currentIndex = 0;
 
+            const detectOriginalQuestion = (row: any): string | undefined => {
+                if (!row) return undefined;
+
+                let question = "";
+
+                // Try common column names
+                const candidates = ['question', 'instruction', 'prompt', 'input', 'query', 'task'];
+                for (const c of candidates) {
+                    if (row[c] && typeof row[c] === 'string' && row[c].length < 2000) {
+                        question = row[c];
+                        break;
+                    }
+                }
+
+                // Try array formats (ShareGPT/ChatML) if no simple column found
+                if (!question) {
+                    const msgs = row.messages || row.conversation || row.conversations;
+                    if (Array.isArray(msgs)) {
+                        const firstUser = msgs.find((m: any) => m.role === 'user' || m.from === 'human');
+                        if (firstUser) question = firstUser.content || firstUser.value;
+                    }
+                }
+
+                if (!question) return undefined;
+
+                // Append Options if available (for multiple choice datasets)
+                // Check for 'options', 'choices'
+                // Format: Map/Object {"A": "...", "B": "..."} or Array ["...", "..."]
+                const optionsField = row['options'] || row['choices'];
+                if (optionsField) {
+                    let formattedOptions = "";
+                    if (typeof optionsField === 'string') {
+                        formattedOptions = "\n\nOptions:\n" + optionsField;
+                    } else if (Array.isArray(optionsField)) {
+                        formattedOptions = "\n\nOptions:\n" + optionsField.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join('\n');
+                    } else if (typeof optionsField === 'object') {
+                        // entries [key, value]
+                        const entries = Object.entries(optionsField);
+                        if (entries.length > 0) {
+                            formattedOptions = "\n\nOptions:\n" + entries.map(([k, v]) => `${k}: ${v}`).join('\n');
+                        }
+                    }
+                    if (formattedOptions) question += formattedOptions;
+                }
+
+                return question;
+            };
+
             const worker = async (id: number) => {
-                while (currentIndex < inputs.length) {
+                while (currentIndex < workItems.length) {
                     if (abortControllerRef.current?.signal.aborted) break;
                     const myIndex = currentIndex++;
-                    if (myIndex >= inputs.length) break;
-                    const textToProcess = inputs[myIndex];
+                    if (myIndex >= workItems.length) break;
+
+                    const item = workItems[myIndex];
+                    const originalQuestion = detectOriginalQuestion(item.row);
+
                     setProgress(p => ({ ...p, activeWorkers: p.activeWorkers + 1 }));
-                    const result = await generateSingleItem(textToProcess, id);
+
+                    const result = await generateSingleItem(item.content, id, { originalQuestion });
+
                     setProgress(p => ({
                         ...p,
                         current: p.current + 1,
@@ -971,18 +1114,24 @@ export default function App() {
                     }));
 
                     if (result) {
-                        // Save to Local Storage
-                        LogStorageService.saveLog(sessionUid, result);
-                        setTotalLogCount(prev => prev + 1);
+                        // Inject session name
+                        if (sessionNameRef.current) {
+                            result.sessionName = sessionNameRef.current;
+                        }
 
-                        if (environment === 'production' && !result.isError) {
+                        // Save to Local Storage
+                        LogStorageService.saveLog(sessionUidRef.current, result);
+                        setLogsTrigger(prev => prev + 1);
+                        // setTotalLogCount(prev => prev + 1); // Removed optimistic update to avoid drift
+
+                        if (!result.isError && FirebaseService.isFirebaseConfigured()) {
                             try {
                                 await FirebaseService.saveLogToFirebase(result);
                                 updateDbStats();
                             } catch (saveErr: any) {
                                 console.error("Firebase Sync Error", saveErr);
                                 const updated = { ...result, storageError: saveErr.message || "Save failed" };
-                                LogStorageService.updateLog(sessionUid, updated);
+                                LogStorageService.updateLog(sessionUidRef.current, updated);
                             }
                         }
 
@@ -996,13 +1145,14 @@ export default function App() {
                     }
                 }
             };
-            const workers = Array.from({ length: Math.min(concurrency, inputs.length) }, (_, i) => worker(i));
+            const workers = Array.from({ length: Math.min(concurrency, workItems.length) }, (_, i) => worker(i));
             await Promise.all(workers);
         } catch (err: any) {
             if (err.name !== 'AbortError') setError(err.message);
         } finally {
             setIsRunning(false);
         }
+
     };
 
     const stopGeneration = () => {
@@ -1022,7 +1172,17 @@ export default function App() {
         const confirm = window.confirm(`Exporting ${totalLogCount} logs. This might take a moment.`);
         if (!confirm) return;
 
-        const allLogs = LogStorageService.getLogs(sessionUid, 1, 10000000); // Hack to get all.
+        console.log('[Export] Session UID:', sessionUid);
+        console.log('[Export] Total Log Count:', totalLogCount);
+
+        const allLogs = LogStorageService.getAllLogs(sessionUid);
+        console.log('[Export] Retrieved logs:', allLogs.length);
+
+        if (allLogs.length === 0) {
+            alert('No logs found to export. Check console for details.');
+            return;
+        }
+
         // allLogs is SynthLogItem[] because getLogs returns array
         const jsonl = allLogs.map((log: SynthLogItem) => JSON.stringify(log)).join('\n');
         const blob = new Blob([jsonl], { type: 'application/x-jsonlines' });

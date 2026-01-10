@@ -1,10 +1,11 @@
-import firebase from 'firebase/compat/app';
+import { initializeApp, getApps, deleteApp, FirebaseApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, Firestore, getDocs, query, orderBy, deleteDoc, doc, getCountFromServer, where, limit, writeBatch } from 'firebase/firestore';
 import { SynthLogItem, FirebaseConfig, VerifierItem } from '../types';
 import { logger } from '../utils/logger';
 
 let db: Firestore | null = null;
-let app: any | null = null;
+let app: FirebaseApp | null = null;
+let currentConfigStr: string | null = null;
 
 export interface SavedSession {
     id: string;
@@ -32,23 +33,32 @@ export const initializeFirebase = async (config: FirebaseConfig): Promise<boolea
             return false;
         }
 
-        // Clean up existing app if re-initializing
+        const configStr = JSON.stringify(config);
+
+        // Prevent redundant re-initialization (fixes AbortError)
+        if (app && currentConfigStr === configStr) {
+            if (!db) db = getFirestore(app);
+            return true;
+        }
+
+        // Clean up existing app if re-initializing with NEW config
         if (app) {
             try {
-                await app.delete();
+                await deleteApp(app);
             } catch (e) {
                 logger.warn("Failed to delete existing Firebase app", e);
             }
         } else {
-            // Check for default app created elsewhere (e.g. hot reload)
-            const apps = firebase.apps;
-            if (apps.length > 0) {
-                await Promise.all(apps.map(a => a.delete()));
+            // Check for default apps created by potential hot-reload or other instances
+            const existingApps = getApps();
+            if (existingApps.length > 0) {
+                await Promise.all(existingApps.map(a => deleteApp(a)));
             }
         }
 
-        app = firebase.initializeApp(config);
+        app = initializeApp(config);
         db = getFirestore(app);
+        currentConfigStr = configStr;
         logger.log("Firebase Initialized Successfully via dynamic config");
         return true;
     } catch (e) {
@@ -57,16 +67,30 @@ export const initializeFirebase = async (config: FirebaseConfig): Promise<boolea
     }
 };
 
+// Track ongoing initialization to prevent race conditions
+let initPromise: Promise<boolean> | null = null;
+
 // Auto-init on load if env vars exist
 const envConfig = getEnvConfig();
 if (envConfig.apiKey) {
-    initializeFirebase(envConfig).catch(console.error);
+    initPromise = initializeFirebase(envConfig);
+    initPromise.catch(console.error);
 }
 
 export const isFirebaseConfigured = () => !!db;
 
+// Wait for any pending initialization before saving
+const ensureInitialized = async (): Promise<boolean> => {
+    if (initPromise) {
+        await initPromise;
+    }
+    return !!db;
+};
+
 export const saveLogToFirebase = async (log: SynthLogItem, collectionName: string = 'synth_logs') => {
-    if (!db) {
+    // Wait for initialization to complete
+    const isReady = await ensureInitialized();
+    if (!isReady || !db) {
         throw new Error("Firebase is not configured. Set keys in GUI or .env.");
     }
 
@@ -101,7 +125,43 @@ export const saveLogToFirebase = async (log: SynthLogItem, collectionName: strin
             docData.deepTrace = log.deepTrace;
         }
 
-        await addDoc(collection(db, collectionName), docData);
+        // Add multi-turn conversation messages
+        if (log.messages && log.messages.length > 0) {
+            docData.messages = log.messages;
+            docData.isMultiTurn = true;
+        }
+
+        // Add session name if available (auto-naming feature)
+        if (log.sessionName) {
+            docData.sessionName = log.sessionName;
+        }
+
+        // Retry logic with exponential backoff (handles transient AbortErrors)
+        const MAX_RETRIES = 3;
+        let lastError: Error | null = null;
+
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            try {
+                await addDoc(collection(db, collectionName), docData);
+                return; // Success, exit
+            } catch (retryErr: any) {
+                lastError = retryErr;
+                const isAbortError = retryErr?.name === 'AbortError' || retryErr?.message?.includes('abort');
+
+                if (isAbortError && attempt < MAX_RETRIES - 1) {
+                    // Exponential backoff: 500ms, 1000ms, 2000ms
+                    const delay = 500 * Math.pow(2, attempt);
+                    logger.warn(`Firebase write aborted (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${delay}ms...`);
+                    await new Promise(r => setTimeout(r, delay));
+                } else {
+                    // Non-abort error or final attempt, throw immediately
+                    throw retryErr;
+                }
+            }
+        }
+
+        // If we exhausted retries, throw the last error
+        if (lastError) throw lastError;
     } catch (e) {
         console.error("Error saving to Firebase:", e);
         throw e;

@@ -11,6 +11,7 @@ interface LogChunk {
 export const LogStorageService = {
     // Save a single log (append to end)
     saveLog: (sessionUid: string, log: SynthLogItem) => {
+        console.log(`[Storage Debug] Saving log for session ${sessionUid}, Log ID: ${log.id}`);
         const indexKey = `${LOG_STORAGE_PREFIX}${sessionUid}_index`;
         const indexStr = localStorage.getItem(indexKey);
         let totalCount = 0;
@@ -42,13 +43,16 @@ export const LogStorageService = {
 
         // Save chunk
         try {
+            console.log(`[Storage Debug] Writing chunk ${lastChunkId}, Items: ${currentChunk.length}`);
             localStorage.setItem(`${LOG_STORAGE_PREFIX}${sessionUid}_chunk_${lastChunkId}`, JSON.stringify(currentChunk));
 
             // Update index
-            localStorage.setItem(indexKey, JSON.stringify({
+            const newIndex = {
                 totalCount: totalCount + 1,
                 lastChunkId: lastChunkId
-            }));
+            };
+            localStorage.setItem(indexKey, JSON.stringify(newIndex));
+            console.log(`[Storage Debug] Index updated:`, newIndex);
 
             return true;
         } catch (e) {
@@ -142,6 +146,58 @@ export const LogStorageService = {
             }
             localStorage.removeItem(indexKey);
         }
+    },
+
+    // Robustly get all logs for export by iterating chunks 
+    getAllLogs: (sessionUid: string): SynthLogItem[] => {
+        const indexKey = `${LOG_STORAGE_PREFIX}${sessionUid}_index`;
+        const indexStr = localStorage.getItem(indexKey);
+
+        console.log(`[Export Debug] Fetching logs for session ${sessionUid}`);
+        console.log(`[Export Debug] Index Key: ${indexKey}, Exists: ${!!indexStr}`);
+
+        if (!indexStr) return [];
+
+        const indexData = JSON.parse(indexStr);
+        console.log(`[Export Debug] Index Data:`, indexData);
+
+        let lastChunkId = indexData.lastChunkId;
+        const totalCount = indexData.totalCount;
+
+        // Fallback if lastChunkId is missing (legacy sessions)
+        if (lastChunkId === undefined && totalCount > 0) {
+            lastChunkId = Math.floor((totalCount - 1) / CHUNK_SIZE);
+            console.log(`[Export Debug] Calculated lastChunkId: ${lastChunkId} from count ${totalCount}`);
+        } else if (lastChunkId === undefined) {
+            lastChunkId = 0;
+            console.log(`[Export Debug] Defaulted lastChunkId to 0`);
+        } else {
+            console.log(`[Export Debug] Using stored lastChunkId: ${lastChunkId}`);
+        }
+
+        let all: SynthLogItem[] = [];
+
+        for (let i = 0; i <= lastChunkId; i++) {
+            const chunkKey = `${LOG_STORAGE_PREFIX}${sessionUid}_chunk_${i}`;
+            const chunkStr = localStorage.getItem(chunkKey);
+            console.log(`[Export Debug] Chunk ${i} (Key: ${chunkKey}): ${chunkStr ? 'FOUND' : 'MISSING'}, Length: ${chunkStr?.length}`);
+
+            if (chunkStr) {
+                try {
+                    const chunk = JSON.parse(chunkStr);
+                    if (Array.isArray(chunk)) {
+                        all = all.concat(chunk);
+                        console.log(`[Export Debug] Chunk ${i} added ${chunk.length} items. Total: ${all.length}`);
+                    } else {
+                        console.warn(`[Export Debug] Chunk ${i} is not an array`, chunk);
+                    }
+                } catch (e) {
+                    console.error("Error parsing chunk", i, e);
+                }
+            }
+        }
+        console.log(`[Export Debug] Final log count: ${all.length}`);
+        return all;
     },
 
     // For cleaning up old sessions if needed

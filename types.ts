@@ -9,6 +9,7 @@ export interface ChatMessage {
 export interface SynthLogItem {
   id: string;
   sessionUid?: string; // New: track which session generated this
+  sessionName?: string; // New: human readable session name
   seed_preview: string;
   full_seed: string;
   query: string;
@@ -123,7 +124,7 @@ export interface DeepConfig {
 export interface UserAgentConfig {
   enabled: boolean;
   followUpCount: number;           // How many follow-up questions to generate (1-10)
-  responderPhase: 'writer' | 'responder'; // Which prompt style to use for responses
+  responderPhase: 'writer' | 'rewriter' | 'responder'; // Which agent responds after User Agent
   provider: ProviderType;
   externalProvider: ExternalProvider;
   apiKey: string;

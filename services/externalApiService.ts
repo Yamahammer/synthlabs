@@ -197,16 +197,43 @@ export const generateSyntheticSeeds = async (
 
 // Helper to safely parse JSON from LLM output, handling markdown blocks
 function parseJsonContent(content: string): any {
-  const cleanContent = content
-    .replace(/^```json\s*/, '')
-    .replace(/^```\s*/, '')
-    .replace(/\s*```$/, '')
-    .trim();
+  let cleanContent = content.trim();
 
+  // 1. Try to extract JSON from markdown code blocks
+  const codeBlockMatch = cleanContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch) {
+    cleanContent = codeBlockMatch[1].trim();
+  } else {
+    // 2. Fallback: try to strip leading ```json and trailing ``` if no full block found
+    cleanContent = cleanContent
+      .replace(/^```json\s*/, '')
+      .replace(/^```\s*/, '')
+      .replace(/\s*```$/, '')
+      .trim();
+  }
+
+  // 3. Try direct parse
   try {
     return JSON.parse(cleanContent);
   } catch (e) {
-    console.error("JSON Parse Failed", e, content);
-    throw new Error("Failed to parse response as JSON");
+    // 4. Try to find the first valid { ... } object in the text
+    // We match from the first '{' to the last '}'
+    const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch (e2) {
+        // Fall through
+      }
+    }
+
+    // If all parsing fails, wrap the raw text as a fallback response
+    // This allows the conversation to continue even if JSON wasn't returned
+    console.warn("JSON Parse Failed, using raw text as fallback", e);
+    return {
+      answer: content.trim(),
+      reasoning: "",
+      follow_up_question: content.trim() // For user agent responses
+    };
   }
 }

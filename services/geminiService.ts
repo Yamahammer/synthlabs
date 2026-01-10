@@ -44,17 +44,43 @@ const callGeminiWithRetry = async (
 /**
  * Helper to safely parse JSON from LLM output, handling markdown blocks
  */
+/**
+ * Helper to safely parse JSON from LLM output, handling markdown blocks
+ */
 function cleanAndParseJSON(text: string | undefined): any {
   if (!text) return {};
-  const clean = text
-    .replace(/^```json\s*/, '')
-    .replace(/^```\s*/, '')
-    .replace(/\s*```$/, '')
-    .trim();
+
+  let cleanContent = text.trim();
+
+  // 1. Try to extract JSON from markdown code blocks
+  const codeBlockMatch = cleanContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch) {
+    cleanContent = codeBlockMatch[1].trim();
+  } else {
+    // 2. Fallback: try to strip leading ```json and trailing ```
+    cleanContent = cleanContent
+      .replace(/^```json\s*/, '')
+      .replace(/^```\s*/, '')
+      .replace(/\s*```$/, '')
+      .trim();
+  }
+
+  // 3. Try direct parse
   try {
-    return JSON.parse(clean);
+    return JSON.parse(cleanContent);
   } catch (e) {
+    // 4. Try to find the first valid { ... } object in the text
+    const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch (e2) {
+        // Fall through
+      }
+    }
+
     logger.warn("JSON Parse Warning, returning raw text or empty object", e);
+    // Return empty object or fallback if expected
     return {};
   }
 }

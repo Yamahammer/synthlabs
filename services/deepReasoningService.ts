@@ -260,6 +260,9 @@ Instructions: Based on the reasoning trace above, write the final high-quality r
 
 interface MultiTurnOrchestrationParams {
   initialInput: string;
+  initialQuery?: string; // The question/query to show as first user message
+  initialResponse?: string; // Pre-generated response from DEEP mode
+  initialReasoning?: string; // Pre-generated reasoning from DEEP mode
   userAgentConfig: UserAgentConfig;
   responderConfig: {
     provider: 'gemini' | 'external';
@@ -286,38 +289,72 @@ interface MultiTurnOrchestrationParams {
 export const orchestrateMultiTurnConversation = async (
   params: MultiTurnOrchestrationParams
 ): Promise<SynthLogItem> => {
-  const { initialInput, userAgentConfig, responderConfig, signal, maxRetries, retryDelay, generationParams } = params;
+  const { initialInput, initialQuery, initialResponse: preGeneratedResponse, initialReasoning: preGeneratedReasoning, userAgentConfig, responderConfig, signal, maxRetries, retryDelay, generationParams } = params;
   const startTime = Date.now();
 
+  // Heuristic: Use initialInput (user's selected column content) if the inferred query looks like a database ID/slug or is missing.
+  // This addresses the issue where "identify_preventive_measure_for_SIDS" (an ID) is shown instead of the actual question.
+  let displayQuery = initialQuery || "";
+  const isSlugOrId = (s: string) => {
+    if (!s) return true;
+    if (s === "Inferred Query" || s === "Refined Query") return true;
+    // Check for "slug_style_string" with no spaces, or very short strings
+    return (!s.includes(' ') && s.length < 50) || s.length < 5;
+  };
+
+  if (isSlugOrId(displayQuery)) {
+    displayQuery = initialInput.substring(0, 300) + (initialInput.length > 300 ? "..." : "");
+  }
+
   const messages: ChatMessage[] = [];
+
+  // Helper to format assistant content with <think> tags
+  const formatAssistantContent = (answer: string, reasoning?: string): string => {
+    if (reasoning && reasoning.trim()) {
+      return `<think>${reasoning}</think>\n\n${answer}`;
+    }
+    return answer;
+  };
 
   logger.group("🔄 STARTING MULTI-TURN CONVERSATION ORCHESTRATION");
   logger.log("Initial Input:", initialInput.substring(0, 100) + "...");
   logger.log("Follow-up Count:", userAgentConfig.followUpCount);
+  logger.log("Using pre-generated response:", !!preGeneratedResponse);
 
   try {
-    // Initial user message from seed
+    // Initial user message from the query (not the full reasoning trace)
     messages.push({
       role: 'user',
-      content: initialInput
+      content: displayQuery
     });
 
-    // Generate initial response
-    logger.log("📝 Generating initial response...");
-    const initialResponse = await callAgent(
-      responderConfig,
-      initialInput,
-      DEEP_PHASE_PROMPTS.responder,
-      signal,
-      maxRetries,
-      retryDelay,
-      generationParams
-    );
+    let firstResponse: string;
+    let firstReasoning: string | undefined;
+
+    // Use pre-generated response from DEEP if provided, otherwise generate new
+    if (preGeneratedResponse) {
+      logger.log("📝 Using pre-generated response from DEEP mode...");
+      firstResponse = preGeneratedResponse;
+      firstReasoning = preGeneratedReasoning;
+    } else {
+      logger.log("📝 Generating initial response...");
+      const generatedResponse = await callAgent(
+        responderConfig,
+        initialInput,
+        DEEP_PHASE_PROMPTS.responder,
+        signal,
+        maxRetries,
+        retryDelay,
+        generationParams
+      );
+      firstResponse = generatedResponse.answer || generatedResponse.reasoning || "No response generated.";
+      firstReasoning = generatedResponse.reasoning;
+    }
 
     messages.push({
       role: 'assistant',
-      content: initialResponse.answer || initialResponse.reasoning || "No response generated.",
-      reasoning: initialResponse.reasoning
+      content: formatAssistantContent(firstResponse, firstReasoning),
+      reasoning: firstReasoning
     });
 
     // Loop for follow-up questions
@@ -358,7 +395,8 @@ export const orchestrateMultiTurnConversation = async (
       });
 
       // Generate response to follow-up
-      const responseInput = `Previous conversation:\n${conversationContext}\n\n[USER]: ${followUpQuestion}\n\nProvide a detailed response.`;
+      // System prompt is passed separately via callAgent, so user input only needs conversation context
+      const responseInput = `Previous conversation:\n${conversationContext}\n\n[USER]: ${followUpQuestion}\n\nProvide a detailed response using symbolic reasoning (→, ↺, ∴, !, ●, ◐, ○).\n\nOutput valid JSON only:\n{\n  "reasoning": "[Stenographic trace with symbols]",\n  "answer": "[Final comprehensive answer]"\n}`;
       const responseResult = await callAgent(
         responderConfig,
         responseInput,
@@ -371,7 +409,7 @@ export const orchestrateMultiTurnConversation = async (
 
       messages.push({
         role: 'assistant',
-        content: responseResult.answer || responseResult.reasoning || "Response generated.",
+        content: formatAssistantContent(responseResult.answer || responseResult.reasoning || "Response generated.", responseResult.reasoning),
         reasoning: responseResult.reasoning
       });
     }
@@ -382,9 +420,9 @@ export const orchestrateMultiTurnConversation = async (
     // Build final log item
     const logItem: SynthLogItem = {
       id: crypto.randomUUID(),
-      seed_preview: initialInput.substring(0, 150) + "...",
+      seed_preview: displayQuery.substring(0, 150) + (displayQuery.length > 150 ? "..." : ""),
       full_seed: initialInput,
-      query: initialInput.substring(0, 200),
+      query: initialQuery,
       reasoning: messages.filter(m => m.role === 'assistant').map(m => m.reasoning).filter(Boolean).join('\n---\n'),
       answer: messages[messages.length - 1]?.content || "",
       timestamp: new Date().toISOString(),
