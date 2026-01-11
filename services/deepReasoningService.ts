@@ -128,32 +128,24 @@ export const orchestrateDeepReasoning = async (
     ]);
 
     // 2. Aggregate Context for the Writer
+    // NOTE: Keep this purely data-focused. Do NOT include format instructions here -
+    // those belong in the Writer system prompt to avoid conflicting instructions.
     const aggregatedContext = `
-# SYSTEM ORCHESTRATION REPORT
-You are the [FINAL SYNTHESIS AGENT]. Your inputs are the reports from three specialized sub-agents (Meta-Analysis, Retrieval, Derivation) analyzing the [ORIGINAL SEED].
+# PHASE OUTPUTS FOR SYNTHESIS
 
-## 1. SOURCE DATA
-[ORIGINAL SEED]
+## ORIGINAL SEED
 ${input}
 
-## 2. AGENT REPORTS
-### PHASE 1: META-ANALYSIS (Intent & Traps)
+## META-ANALYSIS OUTPUT (Phase 0)
 ${JSON.stringify(metaResult, null, 2)}
 
-### PHASE 2: RETRIEVAL (Facts & Constraints)
+## RETRIEVAL OUTPUT (Phase 1)
 ${JSON.stringify(retrievalResult, null, 2)}
 
-### PHASE 3: DERIVATION (Logical Steps)
+## DERIVATION OUTPUT (Phase 2)
 ${JSON.stringify(derivationResult, null, 2)}
 
-## 3. SYNTHESIS INSTRUCTION
-Your goal is to unify these insights into a SINGLE, PERFECT "Stenographic Reasoning Trace" and final answer.
-
-**MANDATORY OUTPUT FORMAT (JSON ONLY)**
-You must output a single valid JSON object. Do NOT wrap it in markdown code blocks.
-{
-  "reasoning": "A single continuous string using stenographic symbols (→, ↺, ∴, ●, ⚠) combining Phase 2 constraints and Phase 3 logic."
-}
+Synthesize these phase outputs according to your system prompt instructions.
 `;
 
     logger.log("📝 Constructed Aggregated Context for Writer:", aggregatedContext);
@@ -414,7 +406,8 @@ export const orchestrateMultiTurnConversation = async (
 
       // Generate response to follow-up
       // System prompt is passed separately via callAgent, so user input only needs conversation context
-      const responseInput = `Previous conversation:\n${conversationContext}\n\n[USER]: ${followUpQuestion}\n\nProvide a detailed response using symbolic reasoning (→, ↺, ∴, !, ●, ◐, ○).\n\nOutput valid JSON only:\n{\n  "reasoning": "[Stenographic trace with symbols]",\n  "answer": "[Final comprehensive answer]"\n}`;
+      // NOTE: Format instructions are in the responder system prompt - keep this minimal
+      const responseInput = `Previous conversation:\n${conversationContext}\n\n[USER]: ${followUpQuestion}\n\nRespond according to your system prompt instructions.`;
       const responseResult = await callAgent(
         responderConfig,
         responseInput,
