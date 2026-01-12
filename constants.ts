@@ -399,13 +399,13 @@ INVALID: <H≈0.3> Parse(query) ● which gives us → then Infer(result) ◐ �
 
 | Phase Output | Symbol | Example Operation |
 |--------------|--------|-------------------|
-| Meta.intent | ● | Parse(canonical_question) ● |
-| Meta.traps | ※ | Trap(false_premise) ※ |
-| Retrieval.facts | ● | Retrieve(speed_of_light:299792km/s) ● |
+| Meta.intent | ● | Parse(canonicalQuestion) ● |
+| Meta.traps | ※ | Trap(falsePremise) ※ |
+| Retrieval.facts | ● | Retrieve(speedOfLight:299792km/s) ● |
 | Retrieval.constraints | ※ | Constraint(budget<$500) ※ |
 | Retrieval.entities | ● | Entity(Amtrak) ● |
 | Derivation.steps | ◐ | Calc(result:$365) ◐ |
-| Derivation.assumptions | ? | Assume(no_traffic) ? |
+| Derivation.assumptions | ? | Assume(noTraffic) ? |
 
 ## CANONICAL OPERATIONS
 Phase 0: Parse(), LangID(), Domain(), Task(), Trap()
@@ -422,7 +422,7 @@ INPUT (from upstream phases):
 
 OUTPUT:
 {
-  "reasoning": "<H≈0.3> Parse(ground_transport_NYC_LA) ● → Trap(fastest_ambiguous) ※ → Assume(door_to_door) ? → Retrieve(no_direct_train) ● → Retrieve(Amtrak:67h) ● → Retrieve(drive:40h) ● → Constraint(no_flying) ※ → Compare(train_vs_drive) ◐ → Infer(drive_faster) ◐ → Calc(fuel:$300-500) ◐ → ∴",
+  "reasoning": "<H≈0.3> Parse(groundTransportNYCtoLA) ● → Trap(fastestAmbiguous) ※ → Assume(doorToDoor) ? → Retrieve(noDirectTrain) ● → Retrieve(Amtrak:67h) ● → Retrieve(drive:40h) ● → Constraint(noFlying) ※ → Compare(trainVsDrive) ◐ → Infer(driveFaster) ◐ → Calc(fuel:$300-500) ◐ → ∴",
   "answer": "Driving is the fastest ground option at approximately 40 hours. Amtrak takes roughly 67 hours with transfers. Fuel costs approximately $300-500."
 }
 
@@ -463,7 +463,7 @@ The stenographic trace from the Writer phase.
 
 1. **Derive from trace only** - Extract information ONLY from the [REASONING TRACE]. Do not invent facts, add examples, or include information not present in the trace.
 
-2. **No elaboration** - If a concept appears in the trace as `Retrieve(X) ●`, your prose should mention X - nothing more. Do not expand on topics or add context the trace doesn't contain.
+2. **No elaboration** - If a concept appears in the trace as 'Retrieve(X) ●', your prose should mention X - nothing more. Do not expand on topics or add context the trace doesn't contain.
 
 3. **PRESERVE epistemic status** - This is the most important rule:
    - ● claims → state as FACT ("X is...", "The data confirms...")
@@ -500,7 +500,7 @@ The stenographic trace from the Writer phase.
 ### Example 1: Technical Query
 [QUERY]: What is the fastest ground transport from NYC to LA?
 [REASONING TRACE]:
-<H≈0.3> Parse(ground_transport) ● → Retrieve(no_direct_train) ● → Retrieve(Amtrak:67h) ● → Retrieve(drive:40h) ● → Compare(options) ◐ → Infer(drive_fastest) ◐ → Gap(traffic_variance) ? → Risk(estimate_uncertainty) ⚠ → ∴
+<H≈0.3> Parse(groundTransport) ● → Retrieve(noDirectTrain) ● → Retrieve(Amtrak:67h) ● → Retrieve(drive:40h) ● → Compare(options) ◐ → Infer(driveFastest) ◐ → Gap(trafficVariance) ? → Risk(estimateUncertainty) ⚠ → ∴
 
 [ANSWER]:
 "Driving is the fastest ground transportation option from NYC to LA, taking approximately 40 hours [●]. Amtrak train service, requiring transfers, takes roughly 67 hours [●]. Based on these comparisons, driving appears to be the clear choice for speed [◐]. Assuming normal traffic conditions [?], actual travel times may vary depending on route, weather, and rest stops [⚠]."
@@ -508,7 +508,7 @@ The stenographic trace from the Writer phase.
 ### Example 2: Query with Insights
 [QUERY]: Most fuel-efficient route?
 [REASONING TRACE]:
-<H≈0.3> Retrieve(I-40:$365) ● → Retrieve(I-80:$410) ● → Compare(routes) ◐ → Insight(I-40_avoids_passes) ! → Calc(elevation_savings:12%) ◐ → Risk(price_volatility) ⚠ → ∴
+<H≈0.3> Retrieve(I40:$365) ● → Retrieve(I80:$410) ● → Compare(routes) ◐ → Insight(I40AvoidsPasses) ! → Calc(elevationSavings:12%) ◐ → Risk(priceVolatility) ⚠ → ∴
 
 [ANSWER]:
 "The I-40 route costs approximately $365 in fuel, while I-80 costs around $410 [●]. Importantly, I-40 avoids major mountain passes [!], which likely accounts for about 12% fuel savings due to reduced elevation changes [◐]. Note that fuel prices fluctuate, so actual costs may differ [⚠]."
@@ -526,7 +526,7 @@ WRONG - Adds information not in trace:
   Good: "Driving takes approximately 40 hours."
 
 WRONG - Ignores warnings:
-  Trace: "...Risk(estimate_uncertainty) ⚠ → ∴"
+  Trace: "...Risk(estimateUncertainty) ⚠ → ∴"
   Bad: (No mention of uncertainty in answer)
   Good: "Note that these are estimates and actual values may vary."`,
 
@@ -601,7 +601,7 @@ FORBIDDEN in reasoning:
 [USER]: What's the fastest way to get from NYC to LA without flying?
 [RESPONSE]:
 {
-  "reasoning": "<H≈0.3> Parse(ground_transport_NYC_LA) ● → Retrieve(train:67h) ● → Retrieve(drive:40h) ● → Compare(options) ◐ → Infer(drive_fastest) ◐ → ∴",
+  "reasoning": "<H≈0.3> Parse(groundTransportNYCtoLA) ● → Retrieve(train:67h) ● → Retrieve(drive:40h) ● → Compare(options) ◐ → Infer(driveFastest) ◐ → ∴",
   "answer": "Driving is fastest at approximately 40 hours. Train takes about 67 hours via Amtrak with transfers."
 }
 
@@ -609,7 +609,7 @@ FORBIDDEN in reasoning:
 [USER]: What about the fuel cost for driving?
 [RESPONSE]:
 {
-  "reasoning": "<H≈0.3> Prior(drive_fastest:40h) ● → NewQuery(fuel_cost) ● → Retrieve(distance:2800mi) ● → Retrieve(avg_mpg:30) ● → Retrieve(gas_price:$3.50) ◐ → Calc(gallons:93) ◐ → Calc(cost:$326) ◐ → Risk(price_variance) ⚠ → ∴",
+  "reasoning": "<H≈0.3> Prior(driveFastest:40h) ● → NewQuery(fuelCost) ● → Retrieve(distance:2800mi) ● → Retrieve(avgMPG:30) ● → Retrieve(gasPrice:$3.50) ◐ → Calc(gallons:93) ◐ → Calc(cost:$326) ◐ → Risk(priceVariance) ⚠ → ∴",
   "answer": "For the ~2,800 mile drive, assuming 30 MPG and current gas prices around $3.50/gallon, fuel would cost approximately $326. Actual costs vary with vehicle efficiency and gas price fluctuations."
 }
 
@@ -617,7 +617,7 @@ FORBIDDEN in reasoning:
 [USER]: Actually, can you recalculate assuming I have an EV?
 [RESPONSE]:
 {
-  "reasoning": "<H≈0.5> Prior(distance:2800mi) ● → Refine(vehicle_type:EV) ↺ → Retrieve(EV_efficiency:3.5mi/kWh) ● → Retrieve(electricity:$0.13/kWh) ◐ → Calc(kWh:800) ◐ → Calc(cost:$104) ◐ → Constraint(charging_stops) ※ → Gap(charger_availability) ? → Risk(range_anxiety) ⚠ → ∴",
+  "reasoning": "<H≈0.5> Prior(distance:2800mi) ● → Refine(vehicleType:EV) ↺ → Retrieve(EVEfficiency:3.5mi/kWh) ● → Retrieve(electricity:$0.13/kWh) ◐ → Calc(kWh:800) ◐ → Calc(cost:$104) ◐ → Constraint(chargingStops) ※ → Gap(chargerAvailability) ? → Risk(rangeAnxiety) ⚠ → ∴",
   "answer": "With an EV averaging 3.5 mi/kWh and electricity at ~$0.13/kWh, the 2,800 miles would cost approximately $104 in charging. Note: this requires multiple charging stops, and charger availability may vary along the route."
 }
 
@@ -630,7 +630,7 @@ WRONG - Missing confidence markers:
   "Prior → Retrieve → Calc → ∴"
 
 WRONG - Re-explains established facts:
-  "<H≈0.3> Parse(fuel_cost) ● → Retrieve(train:67h) ● → Retrieve(drive:40h) ● → ..."
+  "<H≈0.3> Parse(fuelCost) ● → Retrieve(train:67h) ● → Retrieve(drive:40h) ● → ..."
   ← Don't re-retrieve what's already established
 
 WRONG - Multiple convergence in single turn:
