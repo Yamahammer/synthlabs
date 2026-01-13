@@ -23,6 +23,7 @@ import * as ExternalApiService from './services/externalApiService';
 import * as DeepReasoningService from './services/deepReasoningService';
 import { LogStorageService } from './services/logStorageService';
 import { SettingsService } from './services/settingsService';
+import { TaskClassifierService, TaskType } from './services/taskClassifierService';
 import { fetchHuggingFaceRows, searchDatasets, getDatasetStructure, getDatasetInfo } from './services/huggingFaceService';
 import LogFeed from './components/LogFeed';
 import ReasoningHighlighter from './components/ReasoningHighlighter';
@@ -169,6 +170,10 @@ export default function App() {
     const [cloudSessions, setCloudSessions] = useState<FirebaseService.SavedSession[]>([]);
     const [isCloudLoading, setIsCloudLoading] = useState(false);
 
+    // --- State: Task Classification / Auto-routing ---
+    const [detectedTaskType, setDetectedTaskType] = useState<TaskType | null>(null);
+    const [autoRoutedPromptSet, setAutoRoutedPromptSet] = useState<string | null>(null);
+
     // --- State: Hugging Face Prefetch ---
     const [availableColumns, setAvailableColumns] = useState<string[]>([]);
     const [detectedColumns, setDetectedColumns] = useState<DetectedColumns>({ input: [], output: [], all: [], reasoning: [] });
@@ -177,21 +182,50 @@ export default function App() {
     const [hfTotalRows, setHfTotalRows] = useState<number>(0);
     const [isLoadingHfPreview, setIsLoadingHfPreview] = useState(false);
 
-    // Column detection utility
+    // Column detection utility with expanded patterns
     const detectColumns = (columns: string[]): DetectedColumns => {
-        const inputPatterns = ['prompt', 'question', 'input', 'instruction', 'query', 'text', 'problem', 'request'];
-        const outputPatterns = ['response', 'answer', 'output', 'completion', 'chosen', 'target', 'solution', 'reply', 'assistant'];
-        const reasoningPatterns = ['reasoning', 'thought', 'think', 'rationale', 'chain', 'brain', 'logic'];
+        const inputPatterns = [
+            'prompt', 'question', 'input', 'instruction', 'query', 'text', 'problem', 'request',
+            'context', 'document', 'passage', 'source', 'user', 'human', 'message', 'conversation',
+            'dialog', 'task', 'seed'
+        ];
+        const outputPatterns = [
+            'response', 'answer', 'output', 'completion', 'chosen', 'target', 'solution', 'reply',
+            'assistant', 'gold', 'label', 'expected', 'ground_truth', 'groundtruth', 'reference',
+            'correct', 'synthetic_answer', 'gpt', 'model_output'
+        ];
+        const reasoningPatterns = [
+            'reasoning', 'thought', 'think', 'rationale', 'chain', 'brain', 'logic', 'cot',
+            'explanation', 'analysis', 'steps', 'work', 'process', 'derivation', 'justification',
+            'scratchpad', 'synthetic_reasoning', 'trace'
+        ];
 
-        const input = columns.filter(c =>
-            inputPatterns.some(p => c.toLowerCase().includes(p))
-        );
-        const output = columns.filter(c =>
-            outputPatterns.some(p => c.toLowerCase().includes(p))
-        );
-        const reasoning = columns.filter(c =>
-            reasoningPatterns.some(p => c.toLowerCase().includes(p))
-        );
+        // Score-based detection: exact matches rank higher
+        const scoreMatch = (col: string, patterns: string[]): number => {
+            const name = col.toLowerCase();
+            if (patterns.includes(name)) return 1.0; // Exact match
+            if (patterns.some(p => name.startsWith(p))) return 0.8; // Starts with
+            if (patterns.some(p => name.includes(p))) return 0.5; // Contains
+            return 0;
+        };
+
+        const input = columns
+            .map(c => ({ col: c, score: scoreMatch(c, inputPatterns) }))
+            .filter(x => x.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .map(x => x.col);
+
+        const output = columns
+            .map(c => ({ col: c, score: scoreMatch(c, outputPatterns) }))
+            .filter(x => x.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .map(x => x.col);
+
+        const reasoning = columns
+            .map(c => ({ col: c, score: scoreMatch(c, reasoningPatterns) }))
+            .filter(x => x.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .map(x => x.col);
 
         return { input, output, reasoning, all: columns };
     };
@@ -643,20 +677,6 @@ export default function App() {
         }
     };
 
-    const handleExternalProviderChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const newProvider = e.target.value as ExternalProvider;
-        setExternalProvider(newProvider);
-
-        // Auto-load API Key and Base URL from saved settings
-        const savedKey = SettingsService.getApiKey(newProvider);
-        setExternalApiKey(savedKey || '');
-
-        if (newProvider === 'other') {
-            const savedBaseUrl = SettingsService.getCustomBaseUrl();
-            setCustomBaseUrl(savedBaseUrl || '');
-        }
-    };
-
     const generateRandomTopic = async () => {
         setIsGeneratingTopic(true);
         try {
@@ -996,11 +1016,16 @@ export default function App() {
     };
 
     // --- Core Generation Logic ---
-    // (Identical generateSingleItem, retryItem, retrySave, retryAllFailed, startGeneration, stopGeneration logic)
-    // --- Core Generation Logic ---
-    // (Identical generateSingleItem, retryItem, retrySave, retryAllFailed, startGeneration, stopGeneration logic)
-    const generateSingleItem = async (inputText: string, workerId: number, opts: { retryId?: string, originalQuestion?: string, row?: any } = {}): Promise<SynthLogItem | null> => {
-        const { retryId, originalQuestion, row } = opts;
+    // Runtime prompt configuration for auto-routing (avoids React state race condition)
+    interface RuntimePromptConfig {
+        systemPrompt: string;
+        converterPrompt: string;
+        deepConfig: DeepConfig;
+        promptSet: string;
+    }
+
+    const generateSingleItem = async (inputText: string, workerId: number, opts: { retryId?: string, originalQuestion?: string, row?: any, runtimeConfig?: RuntimePromptConfig } = {}): Promise<SynthLogItem | null> => {
+        const { retryId, originalQuestion, row, runtimeConfig } = opts;
         const startTime = Date.now();
         // Determine source for tracking (outside try for catch access)
         const source = dataSourceMode === 'huggingface'
@@ -1011,7 +1036,11 @@ export default function App() {
         try {
             const safeInput = typeof inputText === 'string' ? inputText : String(inputText);
             let result;
-            const activePrompt = appMode === 'generator' ? systemPrompt : converterPrompt;
+            // Use runtime config if provided (from auto-routing), otherwise fall back to state
+            const effectiveSystemPrompt = runtimeConfig?.systemPrompt ?? systemPrompt;
+            const effectiveConverterPrompt = runtimeConfig?.converterPrompt ?? converterPrompt;
+            const effectiveDeepConfig = runtimeConfig?.deepConfig ?? deepConfig;
+            const activePrompt = appMode === 'generator' ? effectiveSystemPrompt : effectiveConverterPrompt;
             const genParams = getGenerationParams();
             const retryConfig = { maxRetries, retryDelay, generationParams: genParams };
 
@@ -1034,9 +1063,9 @@ export default function App() {
 
                     const rewriteResult = await DeepReasoningService.orchestrateConversationRewrite({
                         messages: chatMessages,
-                        config: deepConfig,
+                        config: effectiveDeepConfig,
                         engineMode: engineMode,
-                        converterPrompt: converterPrompt,
+                        converterPrompt: effectiveConverterPrompt,
                         signal: abortControllerRef.current?.signal,
                         maxRetries,
                         retryDelay,
@@ -1147,8 +1176,8 @@ export default function App() {
                     inputPayload = `${inputPayload}\n\n[EXPECTED ANSWER]\n${expectedAnswer.trim()}`;
                 }
 
-                // Deep copy to prevent mutation of state
-                const runtimeDeepConfig = JSON.parse(JSON.stringify(deepConfig));
+                // Deep copy to prevent mutation of state (use effectiveDeepConfig for auto-routing)
+                const runtimeDeepConfig = JSON.parse(JSON.stringify(effectiveDeepConfig));
 
                 // REMOVED: Intelligent Sync. We now strictly respect the deepConfig.phases.writer.systemPrompt
                 // to avoid confusing behavior where the Main Prompt overwrites the Deep Mode prompt.
@@ -1174,7 +1203,7 @@ export default function App() {
                             apiKey: userAgentConfig.apiKey,
                             model: userAgentConfig.model,
                             customBaseUrl: userAgentConfig.customBaseUrl,
-                            systemPrompt: PromptService.getPrompt('generator', 'responder')
+                            systemPrompt: PromptService.getPrompt('generator', 'responder', runtimeConfig?.promptSet)
                         }
                         : runtimeDeepConfig.phases[responderPhase as keyof typeof runtimeDeepConfig.phases];
 
@@ -1183,7 +1212,11 @@ export default function App() {
                         initialQuery: originalQuestion || deepResult.query || inputPayload, // Use detected question or query or fallback
                         initialResponse: deepResult.answer || '',
                         initialReasoning: deepResult.reasoning || '',
-                        userAgentConfig: userAgentConfig,
+                        userAgentConfig: {
+                            ...userAgentConfig,
+                            // Override with auto-routed prompt set if available
+                            systemPrompt: PromptService.getPrompt('generator', 'user_agent', runtimeConfig?.promptSet)
+                        },
                         responderConfig: responderConfig,
                         signal: abortControllerRef.current?.signal || undefined,
                         maxRetries,
@@ -1461,6 +1494,146 @@ export default function App() {
                 sessionNameRef.current = autoName;
             }
 
+            // --- Auto-routing: Classify task and build runtime prompt config ---
+            // This builds a runtime config to avoid React state race conditions
+            const settings = SettingsService.getSettings();
+            const confidenceThreshold = settings.autoRouteConfidenceThreshold ?? 0.3;
+            const defaultPromptSet = settings.promptSet || 'default';
+
+            // Helper to build runtime config for a prompt set
+            const buildRuntimeConfig = (promptSet: string): RuntimePromptConfig => ({
+                systemPrompt: PromptService.getPrompt('generator', 'system', promptSet),
+                converterPrompt: PromptService.getPrompt('converter', 'system', promptSet),
+                deepConfig: {
+                    ...deepConfig,
+                    phases: {
+                        meta: { ...deepConfig.phases.meta, systemPrompt: PromptService.getPrompt('generator', 'meta', promptSet) },
+                        retrieval: { ...deepConfig.phases.retrieval, systemPrompt: PromptService.getPrompt('generator', 'retrieval', promptSet) },
+                        derivation: { ...deepConfig.phases.derivation, systemPrompt: PromptService.getPrompt('generator', 'derivation', promptSet) },
+                        writer: { ...deepConfig.phases.writer, systemPrompt: PromptService.getPrompt('converter', 'writer', promptSet) },
+                        rewriter: { ...deepConfig.phases.rewriter, systemPrompt: PromptService.getPrompt('converter', 'rewriter', promptSet) }
+                    }
+                },
+                promptSet: promptSet
+            });
+
+            // Start with default config (will be overwritten if auto-routing succeeds)
+            let runtimeConfig: RuntimePromptConfig | undefined = undefined;
+
+            if (settings.autoRouteEnabled && workItems.length > 0) {
+                if (settings.autoRouteMethod === 'heuristic') {
+                    // Multi-sample heuristic classification with voting
+                    const sampleSize = Math.min(5, workItems.length);
+                    const samples = workItems.slice(0, sampleSize);
+                    const votes: { type: TaskType; confidence: number }[] = samples.map(s =>
+                        TaskClassifierService.classifyHeuristic(s.content)
+                    );
+
+                    // Count votes by type, weighted by confidence
+                    const typeScores: Record<string, number> = {};
+                    for (const vote of votes) {
+                        typeScores[vote.type] = (typeScores[vote.type] || 0) + vote.confidence;
+                    }
+
+                    // Find the winning type
+                    let bestType: TaskType = 'unknown';
+                    let bestScore = 0;
+                    for (const [type, score] of Object.entries(typeScores)) {
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestType = type as TaskType;
+                        }
+                    }
+
+                    // Calculate average confidence for the winning type
+                    const winningVotes = votes.filter(v => v.type === bestType);
+                    const avgConfidence = winningVotes.length > 0
+                        ? winningVotes.reduce((sum, v) => sum + v.confidence, 0) / winningVotes.length
+                        : 0;
+
+                    setDetectedTaskType(bestType);
+
+                    if (bestType !== 'unknown' && avgConfidence >= confidenceThreshold) {
+                        const recommendedSet = TaskClassifierService.getRecommendedPromptSet(bestType, defaultPromptSet, settings.taskPromptMapping);
+                        setAutoRoutedPromptSet(recommendedSet);
+                        runtimeConfig = buildRuntimeConfig(recommendedSet);
+
+                        // Also update React state for UI consistency on next render
+                        setSystemPrompt(runtimeConfig.systemPrompt);
+                        setConverterPrompt(runtimeConfig.converterPrompt);
+                        setDeepConfig(runtimeConfig.deepConfig);
+                        logger.log(`[Auto-Route] Detected task: ${bestType} (${winningVotes.length}/${sampleSize} votes, avg confidence: ${(avgConfidence * 100).toFixed(0)}%) → Using prompt set: ${recommendedSet}`);
+                    } else {
+                        setAutoRoutedPromptSet(null);
+                        logger.log(`[Auto-Route] Confidence below threshold (${bestType}: ${(avgConfidence * 100).toFixed(0)}% < ${(confidenceThreshold * 100).toFixed(0)}%) → Fallback to: ${defaultPromptSet}`);
+                    }
+                } else if (settings.autoRouteMethod === 'llm') {
+                    // LLM classification uses first sample (to minimize API calls)
+                    const sampleQuery = workItems[0].content;
+                    try {
+                        const classifierPrompt = TaskClassifierService.getClassifierPrompt(sampleQuery);
+                        const classifierModel = settings.autoRouteLlmModel || externalModel;
+                        let response: string;
+
+                        // Use the currently selected provider for classification
+                        if (provider === 'gemini') {
+                            // Use Gemini for classification
+                            const classifyResult = await GeminiService.generateReasoningTrace(
+                                classifierPrompt,
+                                'You are a task classifier. Reply with ONLY the category name.',
+                                { maxRetries: 1, retryDelay: 1000, generationParams: {} }
+                            );
+                            response = classifyResult.answer || classifyResult.reasoning || '';
+                        } else {
+                            // Use external provider
+                            const classifyResult = await ExternalApiService.callExternalApi({
+                                provider: externalProvider,
+                                apiKey: externalApiKey || SettingsService.getApiKey(externalProvider),
+                                model: classifierModel,
+                                customBaseUrl: customBaseUrl || SettingsService.getCustomBaseUrl(),
+                                systemPrompt: 'You are a task classifier. Output exactly ONE word.',
+                                userPrompt: classifierPrompt,
+                                maxRetries: 1,
+                                retryDelay: 1000,
+                                generationParams: {}
+                            });
+                            response = classifyResult?.answer || classifyResult?.reasoning || JSON.stringify(classifyResult) || '';
+                        }
+
+                        const { type: taskType, confidence: llmConfidence } = TaskClassifierService.parseClassifierResponse(response);
+                        setDetectedTaskType(taskType);
+
+                        if (taskType !== 'unknown' && llmConfidence >= confidenceThreshold) {
+                            const recommendedSet = TaskClassifierService.getRecommendedPromptSet(taskType, defaultPromptSet, settings.taskPromptMapping);
+                            setAutoRoutedPromptSet(recommendedSet);
+                            runtimeConfig = buildRuntimeConfig(recommendedSet);
+
+                            // Also update React state for UI consistency
+                            setSystemPrompt(runtimeConfig.systemPrompt);
+                            setConverterPrompt(runtimeConfig.converterPrompt);
+                            setDeepConfig(runtimeConfig.deepConfig);
+                            logger.log(`[Auto-Route/LLM] Detected task: ${taskType} (confidence: ${(llmConfidence * 100).toFixed(0)}%) → Using prompt set: ${recommendedSet}`);
+                        } else if (taskType === 'unknown') {
+                            setAutoRoutedPromptSet(null);
+                            logger.log(`[Auto-Route/LLM] Classification returned 'unknown' → Fallback to: ${defaultPromptSet}`);
+                        } else {
+                            setAutoRoutedPromptSet(null);
+                            logger.log(`[Auto-Route/LLM] Confidence below threshold (${taskType}: ${(llmConfidence * 100).toFixed(0)}% < ${(confidenceThreshold * 100).toFixed(0)}%) → Fallback to: ${defaultPromptSet}`);
+                        }
+                    } catch (e: any) {
+                        logger.warn(`[Auto-Route/LLM] Classification failed: ${e.message || e} → Fallback to: ${defaultPromptSet}`);
+                        setDetectedTaskType(null);
+                        setAutoRoutedPromptSet(null);
+                        // Build runtimeConfig with default to avoid stale state from previous successful classification
+                        runtimeConfig = buildRuntimeConfig(defaultPromptSet);
+                    }
+                }
+            } else {
+                // Auto-routing disabled - clear any previous detection
+                setDetectedTaskType(null);
+                setAutoRoutedPromptSet(null);
+            }
+
             setProgress({ current: 0, total: workItems.length, activeWorkers: 0 });
             let currentIndex = 0;
 
@@ -1523,7 +1696,7 @@ export default function App() {
 
                     setProgress(p => ({ ...p, activeWorkers: p.activeWorkers + 1 }));
 
-                    const result = await generateSingleItem(item.content, id, { originalQuestion, row: item.row });
+                    const result = await generateSingleItem(item.content, id, { originalQuestion, row: item.row, runtimeConfig });
 
 
                     setProgress(p => ({
@@ -2010,6 +2183,15 @@ export default function App() {
                                 <span>Completed: {progress.current}</span>
                                 <span>Target: {progress.total}</span>
                             </div>
+
+                            {/* Auto-routing status indicator */}
+                            {(detectedTaskType || autoRoutedPromptSet) && (
+                                <div className="mt-2 px-2 py-1.5 bg-purple-500/10 border border-purple-500/20 rounded text-[10px] text-purple-300">
+                                    <span className="opacity-70">Auto-routed:</span>{' '}
+                                    {detectedTaskType && <span className="font-semibold">{detectedTaskType}</span>}
+                                    {autoRoutedPromptSet && <span className="text-purple-400"> → {autoRoutedPromptSet}</span>}
+                                </div>
+                            )}
 
                             {/* Mini DB Panel (Only in Prod) */}
                             {environment === 'production' && (

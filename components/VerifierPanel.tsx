@@ -489,7 +489,8 @@ export default function VerifierPanel({ onImportFromDb, currentSessionUid }: Ver
             const newValue = await VerifierRewriterService.rewriteMessage({
                 item,
                 messageIndex,
-                config: rewriterConfig
+                config: rewriterConfig,
+                promptSet: SettingsService.getSettings().promptSet
             });
 
             setData(prev => prev.map(i => {
@@ -526,7 +527,8 @@ export default function VerifierPanel({ onImportFromDb, currentSessionUid }: Ver
             const newValue = await VerifierRewriterService.rewriteField({
                 item: itemForRewrite,
                 field,
-                config: rewriterConfig
+                config: rewriterConfig,
+                promptSet: SettingsService.getSettings().promptSet
             });
             setData(prev => prev.map(i =>
                 i.id === itemId

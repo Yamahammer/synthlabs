@@ -42,13 +42,28 @@ export interface AppSettings {
     defaultConcurrency?: number;
     theme?: 'dark' | 'light';
     promptSet?: string;
+
+    // Task Classification / Auto-routing
+    autoRouteEnabled?: boolean;
+    autoRouteMethod?: 'heuristic' | 'llm';
+    autoRouteConfidenceThreshold?: number;  // 0-1, triggers routing when confidence exceeds this
+    autoRouteLlmModel?: string;             // Model to use for LLM classification (empty = use current)
+    taskPromptMapping?: Record<string, string>;  // Custom task→prompt mappings (overrides defaults)
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
     providerKeys: {},
     defaultConcurrency: 4,
     theme: 'dark',
-    promptSet: 'default'
+    promptSet: 'default',
+    autoRouteEnabled: false,
+    autoRouteMethod: 'heuristic',
+    // Confidence threshold for auto-routing.
+    // For heuristic mode: confidence = min(keywordScore/3, 1), so 0.3 means "at least 1 keyword match"
+    // For LLM mode: confidence is returned directly by the classifier (0-1)
+    // Lower values = more aggressive routing, higher values = more conservative
+    autoRouteConfidenceThreshold: 0.3,
+    autoRouteLlmModel: ''
 };
 
 // In-memory cache for synchronous access
